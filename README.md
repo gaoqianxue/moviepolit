@@ -53,6 +53,9 @@ Docker 部署一般对应容器内 `/app/app/plugins/moviepolit/__init__.py`（�
 | 剧集 · 近期上线 | 同上，回溯窗口 | 最近首播 |
 | 剧集 · 近期更新 | `/discover/tv` 按 `air_date` 回溯窗口 | 最近有新剧集上线 |
 
+“即将”与“近期”窗口以**今天为界**互不重叠：“即将”从明天起算，“近期”截止今天。
+若两窗口在今天重叠，当天的条目会先被“即将”通道去重吃掉，导致“近期”分组整批为空而静默消失（实测复现过）。
+
 所有查询都带 `watch_region=<地区>`（电影另带 `region=<地区>`），配置了平台时再带 `with_watch_providers=<平台ID>`：
 
 - 平台名通过 `/watch/providers/movie|tv?watch_region=<地区>` 自动解析成 ID（中英文名都匹配，缓存 7 天），

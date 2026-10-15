@@ -720,7 +720,10 @@ class MoviePolit(_PluginBase):
             # 混进结果；传 region 才会按该地区的发行日期过滤。
             params["region"] = self._region
             if phase == "upcoming":
-                params["release_date.gte"] = today.strftime("%Y-%m-%d")
+                # 窗口从明天起算：与「近期上线」以今天为界互不重叠。若两边都含
+                # 今天，page 1 会是同一批今天的条目，recent 分组在跨组去重中被
+                # 整批清空（实网复现：tv/recent 命中 20 条但分组消失）。
+                params["release_date.gte"] = (today + timedelta(days=1)).strftime("%Y-%m-%d")
                 params["release_date.lte"] = (today + timedelta(days=self._days_ahead)).strftime("%Y-%m-%d")
                 params["sort_by"] = "release_date.asc"
             else:
@@ -734,7 +737,9 @@ class MoviePolit(_PluginBase):
                 params["air_date.lte"] = today.strftime("%Y-%m-%d")
                 params["sort_by"] = "popularity.desc"
             elif phase == "upcoming":
-                params["first_air_date.gte"] = today.strftime("%Y-%m-%d")
+                # 同电影：从明天起算，避免与「近期上线/近期更新」在今天重叠，
+                # 否则今天首播的条目会把 recent 分组的候选整批去重掉。
+                params["first_air_date.gte"] = (today + timedelta(days=1)).strftime("%Y-%m-%d")
                 params["first_air_date.lte"] = (today + timedelta(days=self._days_ahead)).strftime("%Y-%m-%d")
                 params["sort_by"] = "first_air_date.asc"
             else:
