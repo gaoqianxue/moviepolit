@@ -493,7 +493,8 @@ class MoviePolit(_PluginBase):
                 found = self._discover(mtype, phase, provider_ids)
             except Exception as e:
                 logger.error(f"流媒体上线监控：查询失败（{mtype}/{phase}）：{e}")
-                failures.append(f"{self._phase_label(mtype, phase)}")
+                failures.append(f"{self._phase_label(mtype, phase)}："
+                                f"{self._short(str(e), 60) or '未知错误'}")
                 continue
             bucket = grouped.setdefault((mtype, phase), [])
             for item in found:
@@ -625,7 +626,7 @@ class MoviePolit(_PluginBase):
             lines.append("⚠️ 未识别的平台：" + "、".join(unknown)
                          + (f"（该地区可用：{'、'.join(available[:12])}）" if available else ""))
         if failures:
-            lines.append("⚠️ 部分查询失败：" + "、".join(failures))
+            lines.append("⚠️ 部分查询失败：" + "；".join(failures))
         return "\n".join(lines)
 
     def _format_line(self, item: dict) -> str:
