@@ -1,11 +1,18 @@
 """
 MoviePolit - 流媒体上线监控
 
-监控指定地区流媒体平台（爱奇艺 / 腾讯视频 / 优酷 / 芒果TV / 哔哩哔哩 / Netflix / Disney+ ...）
+监控指定地区流媒体平台（Netflix / Disney+ / Prime Video / iQIYI / WeTV ...）
 即将上线与近期上线的电影、剧集，通过 MoviePilot 已启用的通知渠道推送。
 
 数据来源：TheMovieDb（复用 MoviePilot「设置 → 媒体识别 → TheMovieDb」中的 API Key、
 API 域名、图片域名与代理配置，无需额外填写任何密钥）。
+
+已知边界（由 TMDB 数据决定，非插件缺陷）：
+  * TMDB 的流媒体平台数据只覆盖部分国家/地区；中国大陆（CN）没有任何平台数据，
+    腾讯视频、优酷、芒果TV、哔哩哔哩未被 TMDB 收录，因此无法作为筛选条件。
+    默认区域取台湾（TW），请按需改为 HK / US / JP / KR / GB / SG。
+  * 电影的流媒体上线日需回查 /movie/{id}/release_dates 的数字版（type=4）记录，
+    不能直接使用 discover 返回的 release_date（那是首要/院线日期）。
 """
 
 import re
@@ -42,8 +49,8 @@ class MoviePolit(_PluginBase):
     _enabled: bool = False
     _onlyonce: bool = False
     _cron: str = "0 9 * * *"
-    _region: str = "CN"
-    _providers: str = "爱奇艺,腾讯视频,优酷,芒果TV,哔哩哔哩"
+    _region: str = "TW"
+    _providers: str = ""
     _include_movie: bool = True
     _include_tv: bool = True
     _include_tv_airing: bool = True
@@ -58,6 +65,9 @@ class MoviePolit(_PluginBase):
     _show_provider_detail: bool = True
     _history_days: int = 30
     _msgtype: str = ""
+
+    # 数字版日期回查缓存 {(地区, tmdb_id): 日期或 None}，仅在一次 check() 内有效
+    _digital_cache: Optional[Dict[Tuple[str, Any], Optional[str]]] = None
 
     # ===== 插件数据 key =====
     _KEY_LATEST = "latest"
@@ -91,7 +101,7 @@ class MoviePolit(_PluginBase):
         self._enabled = bool(config.get("enabled", False))
         self._onlyonce = bool(config.get("onlyonce", False))
         self._cron = (config.get("cron") or "0 9 * * *").strip()
-        self._region = (config.get("region") or "CN").strip().upper()
+        self._region = (config.get("region") or "TW").strip().upper()
         self._providers = (config.get("providers") or "").strip()
         self._include_movie = bool(config.get("include_movie", True))
         self._include_tv = bool(config.get("include_tv", True))
@@ -267,7 +277,7 @@ class MoviePolit(_PluginBase):
                                     {"component": "VTextField",
                                      "props": {"model": "providers",
                                                "label": "监控平台（逗号分隔，留空 = 该地区全部平台）",
-                                               "placeholder": "爱奇艺,腾讯视频,优酷,芒果TV,哔哩哔哩"}}
+                                               "placeholder": "iQIYI,WeTV,Netflix,Disney+"}}
                                 ],
                             }
                         ],
@@ -426,9 +436,17 @@ class MoviePolit(_PluginBase):
                                          "variant": "tonal",
                                          "text": "数据来自 TheMovieDb，复用「设置 → 媒体识别 → TheMovieDb」中的 "
                                                  "API Key，无需额外配置。推送走 MoviePilot 通知渠道，请先在"
-                                                 "「设置 → 通知」启用渠道。平台名称支持中文名（爱奇艺）、英文名"
-                                                 "（iQIYI）或 TMDB 平台 ID；识别失败的平台会在通知里提示。"
-                                                 "即将上线的作品 TMDB 可能尚未关联平台数据，若结果偏少可把「监控平台」留空。",
+                                                 "「设置 → 通知」启用渠道。"
+                                                 "注意：TMDB 的流媒体平台数据只覆盖部分国家/地区，中国大陆（CN）"
+                                                 "目前没有任何平台数据，腾讯视频、优酷、芒果TV、哔哩哔哩也未被 "
+                                                 "TMDB 收录，无法作为筛选条件；建议选择香港（HK）、台湾（TW）、"
+                                                 "美国（US）等地区，并用 iQIYI、WeTV、Netflix 等 TMDB 已收录的"
+                                                 "名称。平台名称支持中文名、英文名或 TMDB 平台 ID；识别失败的"
+                                                 "平台会在通知里提示。即将上线的作品 TMDB 往往还没关联平台数据，"
+                                                 "若按平台筛选在窗口内一条都没查到，插件会自动退回「该地区全部"
+                                                 "平台」重查并在通知里说明；想看得多建议把「监控平台」留空。"
+                                                 "电影显示的是该地区的数字版（流媒体）上线日，插件会逐条回查 "
+                                                 "TMDB 的 release_dates 校正日期，与院线上映日不同属正常现象。",
                                      }}
                                 ],
                             }
@@ -440,8 +458,8 @@ class MoviePolit(_PluginBase):
             "enabled": False,
             "onlyonce": False,
             "cron": "0 9 * * *",
-            "region": "CN",
-            "providers": "爱奇艺,腾讯视频,优酷,芒果TV,哔哩哔哩",
+            "region": "TW",
+            "providers": "",
             "include_movie": True,
             "include_tv": True,
             "include_tv_airing": True,
@@ -469,6 +487,9 @@ class MoviePolit(_PluginBase):
         provider_ids, unknown = self._resolve_provider_ids()
         if self._providers and not provider_ids:
             logger.warning("流媒体上线监控：配置的平台均无法识别，本次按『该地区全部平台』查询")
+
+        # 数字版日期回查缓存，一次 check() 内复用，避免重复请求同一部电影
+        self._digital_cache = {}
 
         # 待执行的查询通道
         passes: List[Tuple[str, str]] = []
@@ -503,6 +524,29 @@ class MoviePolit(_PluginBase):
                 seen.add(item["key"])
                 bucket.append(item)
 
+        # 平台筛选兜底：TMDB 的 watch_providers 在「即将上线」窗口内命中极少
+        # （该窗口内多数条目还没有平台记录）。若按平台筛选一条都没查到，则退回
+        # 「该地区全部平台」重查一次，避免用户填了平台后长期收不到推送。
+        notes: List[str] = []
+        if provider_ids and not any(grouped.values()):
+            logger.warning(f"流媒体上线监控：按平台 {self._providers} 在窗口内未查到内容，"
+                           f"本次退回『该地区全部平台』查询")
+            for mtype, phase in passes:
+                try:
+                    found = self._discover(mtype, phase, [])
+                except Exception as e:
+                    logger.error(f"流媒体上线监控：查询失败（{mtype}/{phase}）：{e}")
+                    failures.append(f"{self._phase_label(mtype, phase)}："
+                                    f"{self._short(str(e), 60) or '未知错误'}")
+                    continue
+                bucket = grouped.setdefault((mtype, phase), [])
+                for item in found:
+                    if item["key"] in seen:
+                        continue
+                    seen.add(item["key"])
+                    bucket.append(item)
+            notes.append(f"平台「{self._providers}」在窗口内无内容，本次已按该地区全部平台查询")
+
         # 去重已推送 + 配额裁剪
         limit = self._max_items if self._max_items > 0 else 100
         quota = max(1, int(limit / len(passes)) + (1 if limit % len(passes) else 0))
@@ -510,15 +554,19 @@ class MoviePolit(_PluginBase):
         if not isinstance(pushed, dict):
             pushed = {}
         sections: List[Tuple[str, List[dict]]] = []
-        total = 0
         for mtype, phase in passes:
             candidates = grouped.get((mtype, phase)) or []
             if self._dedupe:
                 candidates = [item for item in candidates if item["key"] not in pushed]
             candidates = candidates[:quota]
+            # 电影：用真实的数字版发行日覆盖院线日期，并剔除窗口外的条目
+            if mtype == "movie" and self._strict_digital:
+                candidates = self._confirm_digital(candidates, quota)
             if candidates:
                 sections.append((self._phase_label(mtype, phase), candidates))
-                total += len(candidates)
+
+        # 回查后条数可能减少，重新统计
+        total = sum(len(items) for _, items in sections)
 
         # 补齐每条作品的上线平台
         if self._show_provider_detail:
@@ -552,7 +600,7 @@ class MoviePolit(_PluginBase):
 
         # 推送
         title = f"🎬 流媒体上线速递 · {self._region}"
-        text = self._build_message(sections, unknown, failures)
+        text = self._build_message(sections, unknown, failures, notes)
         image = next((item["poster"] for item in all_items if item.get("poster")), "")
         mtype = self._notification_type()
         try:
@@ -608,7 +656,8 @@ class MoviePolit(_PluginBase):
         return f"剧集 · 近期上线（最近 {self._days_back} 天）"
 
     def _build_message(self, sections: List[Tuple[str, List[dict]]],
-                       unknown: List[str], failures: List[str]) -> str:
+                       unknown: List[str], failures: List[str],
+                       notes: Optional[List[str]] = None) -> str:
         lines = [
             f"🎬 流媒体上线速递 · {self._region}",
             self._now().strftime("%Y-%m-%d %H:%M"),
@@ -625,6 +674,8 @@ class MoviePolit(_PluginBase):
             available = self._available_provider_names()
             lines.append("⚠️ 未识别的平台：" + "、".join(unknown)
                          + (f"（该地区可用：{'、'.join(available[:12])}）" if available else ""))
+        for note in notes or []:
+            lines.append(f"ℹ️ {note}")
         if failures:
             lines.append("⚠️ 部分查询失败：" + "；".join(failures))
         return "\n".join(lines)
@@ -664,6 +715,10 @@ class MoviePolit(_PluginBase):
             if self._strict_digital:
                 # 4 = 数字版（流媒体上线）
                 params["with_release_type"] = "4"
+            # 注意：with_release_type 的窗口过滤只认 region，不认 watch_region。
+            # 只传 watch_region 时窗口按“任意地区”的数字版日期匹配，会把院线日期
+            # 混进结果；传 region 才会按该地区的发行日期过滤。
+            params["region"] = self._region
             if phase == "upcoming":
                 params["release_date.gte"] = today.strftime("%Y-%m-%d")
                 params["release_date.lte"] = (today + timedelta(days=self._days_ahead)).strftime("%Y-%m-%d")
@@ -703,8 +758,84 @@ class MoviePolit(_PluginBase):
                     items.append(item)
             if len(results) < 20:
                 break
+
         logger.debug(f"流媒体上线监控：{mtype}/{phase} 命中 {len(items)} 条")
         return items
+
+    def _confirm_digital(self, items: List[dict], limit: int) -> List[dict]:
+        """
+        电影：discover 返回的 release_date 是「首要 / 院线」日期，不是流媒体上线日。
+        逐条回查 release_dates，取出本地区的数字版（type=4）日期：
+          - 日期不在请求窗口内的丢弃（discover 的窗口过滤只认 region，仍可能漏进院线日期）
+          - 用真实数字版日期覆盖 date / year
+        只对将要推送的候选条目回查（limit 上限），避免无效请求。
+        """
+        confirmed: List[dict] = []
+        checked = 0
+        for item in items:
+            if len(confirmed) >= limit:
+                break
+            checked += 1
+            digital = self._digital_date(item["id"])
+            window = self._window_of(item.get("phase"))
+            if not digital:
+                # 查不到数字版日期：丢弃，避免推送错误的院线日期
+                logger.debug(f"流媒体上线监控：{item['key']} 无数字版日期，跳过")
+                continue
+            if window and not (window[0] <= digital <= window[1]):
+                logger.debug(f"流媒体上线监控：{item['key']} 数字版日期 {digital} 不在窗口 "
+                             f"{window[0]}~{window[1]}，跳过")
+                continue
+            item["date"] = digital
+            item["year"] = digital[:4]
+            confirmed.append(item)
+        if len(confirmed) != checked:
+            logger.info(f"流媒体上线监控：电影数字版日期校验通过 {len(confirmed)}/{checked} 条")
+        return confirmed
+
+    def _window_of(self, phase: Optional[str]) -> Optional[Tuple[str, str]]:
+        """取某通道对应的日期窗口（YYYY-MM-DD, YYYY-MM-DD）"""
+        today = self._now().date()
+        if phase == "upcoming":
+            return (today.strftime("%Y-%m-%d"),
+                    (today + timedelta(days=self._days_ahead)).strftime("%Y-%m-%d"))
+        if phase in ("recent", "airing"):
+            return ((today - timedelta(days=self._days_back)).strftime("%Y-%m-%d"),
+                    today.strftime("%Y-%m-%d"))
+        return None
+
+    def _digital_date(self, tmdb_id: Any) -> Optional[str]:
+        """取该电影在本地区的数字版（type=4）发行日；缺失时回退到全球最早的数字版日期"""
+        cache = self._digital_cache
+        cache_key = (self._region, tmdb_id)
+        if isinstance(cache, dict) and cache_key in cache:
+            return cache[cache_key]
+
+        data = self._tmdb_get(f"/movie/{tmdb_id}/release_dates", {})
+        results = (data or {}).get("results") or []
+
+        def pick(entry: dict) -> Optional[str]:
+            dates = [rd.get("release_date") or "" for rd in entry.get("release_dates") or []
+                     if rd.get("type") == 4]
+            dates = sorted(d[:10] for d in dates if d)
+            return dates[0] if dates else None
+
+        found: Optional[str] = None
+        for entry in results:
+            if entry.get("iso_3166_1") == self._region:
+                found = pick(entry)
+                break
+        if not found:
+            # 本地区没有数字版记录时，回退到全球最早的数字版日期（仍比院线日期准确）
+            candidates = [d for entry in results if (d := pick(entry))]
+            found = min(candidates) if candidates else None
+            if found:
+                logger.debug(f"流媒体上线监控：movie:{tmdb_id} 本地区（{self._region}）无数字版记录，"
+                             f"回退到全球最早数字版日期 {found}")
+
+        if isinstance(cache, dict):
+            cache[cache_key] = found
+        return found
 
     def _build_item(self, raw: dict, mtype: str, phase: str) -> Optional[dict]:
         tmdb_id = raw.get("id")
@@ -833,6 +964,10 @@ class MoviePolit(_PluginBase):
         if items:
             self.save_data(cache_key, {"ts": time.time(), "items": items, "region": self._region})
             logger.info(f"流媒体上线监控：已更新 {self._region} 地区平台清单，共 {len(items)} 个")
+        else:
+            # 该地区在 TMDB 没有任何平台数据（例如 CN）：明确告警，不要静默当作“无结果”
+            logger.warning(f"流媒体上线监控：TMDB 未收录 {self._region} 地区的流媒体平台数据，"
+                           "按平台筛选会得到空结果；建议改用 HK / TW / US / JP / KR / GB / SG")
         return items
 
     def _available_provider_names(self) -> List[str]:
