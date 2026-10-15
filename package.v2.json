@@ -1,0 +1,16 @@
+{
+  "MoviePolit": {
+    "name": "流媒体上线监控",
+    "description": "监控指定地区流媒体平台即将上线 / 近期上线的电影、剧集，通过 MoviePilot 通知渠道推送。数据来自 TMDB，复用 MoviePilot 内置 API Key。",
+    "labels": "订阅,消息通知",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/movie.jpg",
+    "author": "MoviePolit",
+    "level": 1,
+    "v3": false,
+    "release": true,
+    "history": {
+      "v1.0.0": "首个版本：按地区与平台监控即将上线 / 近期上线的电影（数字版发行日期）与剧集（首播、近期更新），支持平台名解析、每条作品上线平台、去重推送与详情页海报墙。"
+    }
+  }
+}
