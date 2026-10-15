@@ -1,15 +1,16 @@
 {
   "MoviePolit": {
     "name": "流媒体上线监控",
-    "description": "监控指定地区流媒体平台即将上线 / 近期上线的电影、剧集，通过 MoviePilot 通知渠道推送。数据来自 TMDB，复用 MoviePilot 内置 API Key。",
+    "description": "监控指定地区流媒体平台即将上线 / 近期上线的电影、剧集，并监控国内 B站 番剧 / 国创排播，通过 MoviePilot 通知渠道推送。海外流媒体数据来自 TMDB（复用内置 API Key），国内平台走 B站公开放送表接口（无需 Key）。",
     "labels": "订阅,消息通知",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/movie.jpg",
     "author": "MoviePolit",
     "level": 1,
     "v3": false,
     "release": true,
     "history": {
+      "v1.1.0": "新增国内平台监控：接入哔哩哔哩番剧 / 国创放送表（公开接口、无需鉴权与 Key），最多覆盖未来 8 天，展示集数、更新时刻与追番数；延播条目自动剔除，同一剧集窗口内只保留最早一集。国内平台通道与 TMDB 通道互相独立，单侧失败不影响另一侧，且不会误报整体检测失败（TMDB 正常时仅降级提示）。",
       "v1.0.0": "首个版本：按地区与平台监控即将上线 / 近期上线的电影与剧集（首播、近期更新），支持平台名解析、每条作品上线平台、去重推送与详情页海报墙。电影显示的是经 /movie/{id}/release_dates 逐条回查校正后的数字版（流媒体）上线日。默认地区为 TW、监控平台留空（TMDB 无中国大陆平台数据）。"
     }
   }

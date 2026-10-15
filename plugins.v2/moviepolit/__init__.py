@@ -4,8 +4,12 @@ MoviePolit - 流媒体上线监控
 监控指定地区流媒体平台（Netflix / Disney+ / Prime Video / iQIYI / WeTV ...）
 即将上线与近期上线的电影、剧集，通过 MoviePilot 已启用的通知渠道推送。
 
-数据来源：TheMovieDb（复用 MoviePilot「设置 → 媒体识别 → TheMovieDb」中的 API Key、
-API 域名、图片域名与代理配置，无需额外填写任何密钥）。
+数据来源：
+  * 海外/港台流媒体：TheMovieDb（复用 MoviePilot「设置 → 媒体识别 → TheMovieDb」
+    中的 API Key、API 域名、图片域名与代理配置，无需额外填写任何密钥）。
+  * 国内平台：哔哩哔哩（B站）番剧 / 国创放送表。国内平台中只有 B站 提供公开的
+    排播接口且无需鉴权；接口硬限制为 before=0、after≤7，即只能看未来 8 天。
+    腾讯视频 / 优酷 / 芒果TV 既无公开 API，也不在 TMDB 收录范围内，无法可靠监控。
 
 已知边界（由 TMDB 数据决定，非插件缺陷）：
   * TMDB 的流媒体平台数据只覆盖部分国家/地区；中国大陆（CN）没有任何平台数据，
@@ -37,9 +41,10 @@ class MoviePolit(_PluginBase):
 
     # ===== 插件元信息 =====
     plugin_name = "流媒体上线监控"
-    plugin_desc = "监控指定地区流媒体平台即将上线 / 近期上线的电影、剧集，通过 MoviePilot 通知渠道推送。"
+    plugin_desc = ("监控指定地区流媒体平台即将上线 / 近期上线的电影、剧集，"
+                   "并监控国内 B站 番剧 / 国创排播，通过 MoviePilot 通知渠道推送。")
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/movie.jpg"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_author = "MoviePolit"
     plugin_config_prefix = "moviepolit_"
     plugin_order = 21
@@ -55,6 +60,10 @@ class MoviePolit(_PluginBase):
     _include_tv: bool = True
     _include_tv_airing: bool = True
     _strict_digital: bool = True
+    # 国内平台（B站）监控：番剧 types=1，国创 types=4
+    _include_bili: bool = True
+    _include_bili_anime: bool = True
+    _include_bili_guochuang: bool = True
     _days_ahead: int = 30
     _days_back: int = 7
     _max_items: int = 30
@@ -79,6 +88,15 @@ class MoviePolit(_PluginBase):
     _DEDUPE_KEEP_DAYS = 180
     # 平台名称缓存有效期（秒）
     _PROVIDER_CACHE_TTL = 7 * 24 * 3600
+
+    # ===== 国内平台（B站）放送表 =====
+    # B站放送表接口硬限制：before 只能为 0、after 上限 7，即最多看未来 8 天。
+    # 无需任何鉴权，types=1 番剧、types=4 国创（types=2/3 无数据）。
+    _BILI_TIMELINE = "https://api.bilibili.com/pgc/web/timeline"
+    _BILI_SEASON = "https://api.bilibili.com/pgc/view/web/season"
+    _BILI_AFTER_MAX = 7
+    # B站条目追番数阈值（低于该值的新番信息量过低，默认不过滤）
+    _BILI_MIN_FAVES = 0
 
     # 区域下拉
     _REGIONS = [
@@ -107,6 +125,9 @@ class MoviePolit(_PluginBase):
         self._include_tv = bool(config.get("include_tv", True))
         self._include_tv_airing = bool(config.get("include_tv_airing", True))
         self._strict_digital = bool(config.get("strict_digital", True))
+        self._include_bili = bool(config.get("include_bili", True))
+        self._include_bili_anime = bool(config.get("include_bili_anime", True))
+        self._include_bili_guochuang = bool(config.get("include_bili_guochuang", True))
         self._days_ahead = self._to_int(config.get("days_ahead"), 30, 0, 365)
         self._days_back = self._to_int(config.get("days_back"), 7, 0, 365)
         self._max_items = self._to_int(config.get("max_items"), 30, 1, 100)
@@ -140,6 +161,9 @@ class MoviePolit(_PluginBase):
             "include_tv": self._include_tv,
             "include_tv_airing": self._include_tv_airing,
             "strict_digital": self._strict_digital,
+            "include_bili": self._include_bili,
+            "include_bili_anime": self._include_bili_anime,
+            "include_bili_guochuang": self._include_bili_guochuang,
             "days_ahead": self._days_ahead,
             "days_back": self._days_back,
             "max_items": self._max_items,
@@ -322,7 +346,40 @@ class MoviePolit(_PluginBase):
                             },
                         ],
                     },
-                    # 第五行：时间窗口与条数
+                    # 第五行：国内平台（B站）
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {"component": "VSwitch",
+                                     "props": {"model": "include_bili",
+                                               "label": "监控国内平台（B站）"}}
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {"component": "VSwitch",
+                                     "props": {"model": "include_bili_anime",
+                                               "label": "B站番剧"}}
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {"component": "VSwitch",
+                                     "props": {"model": "include_bili_guochuang",
+                                               "label": "B站国创（国产动画）"}}
+                                ],
+                            },
+                        ],
+                    },
+                    # 第六行：时间窗口与条数
                     {
                         "component": "VRow",
                         "content": [
@@ -364,7 +421,7 @@ class MoviePolit(_PluginBase):
                             },
                         ],
                     },
-                    # 第六行：过滤条件
+                    # 第七行：过滤条件
                     {
                         "component": "VRow",
                         "content": [
@@ -399,7 +456,7 @@ class MoviePolit(_PluginBase):
                             },
                         ],
                     },
-                    # 第七行：通知细节
+                    # 第八行：通知细节
                     {
                         "component": "VRow",
                         "content": [
@@ -437,6 +494,9 @@ class MoviePolit(_PluginBase):
                                          "text": "数据来自 TheMovieDb，复用「设置 → 媒体识别 → TheMovieDb」中的 "
                                                  "API Key，无需额外配置。推送走 MoviePilot 通知渠道，请先在"
                                                  "「设置 → 通知」启用渠道。"
+                                                 "国内平台方面，哔哩哔哩的番剧 / 国创排播走 B站公开放送表接口"
+                                                 "（无需鉴权、无需 Key），最多覆盖未来 8 天；腾讯视频、优酷、"
+                                                 "芒果TV 没有公开接口，也无法通过 TMDB 覆盖，暂不支持。"
                                                  "注意：TMDB 的流媒体平台数据只覆盖部分国家/地区，中国大陆（CN）"
                                                  "目前没有任何平台数据，腾讯视频、优酷、芒果TV、哔哩哔哩也未被 "
                                                  "TMDB 收录，无法作为筛选条件；建议选择香港（HK）、台湾（TW）、"
@@ -464,6 +524,9 @@ class MoviePolit(_PluginBase):
             "include_tv": True,
             "include_tv_airing": True,
             "strict_digital": True,
+            "include_bili": True,
+            "include_bili_anime": True,
+            "include_bili_guochuang": True,
             "days_ahead": 30,
             "days_back": 7,
             "max_items": 30,
@@ -501,14 +564,20 @@ class MoviePolit(_PluginBase):
             passes.append(("tv", "recent"))
             if self._include_tv_airing:
                 passes.append(("tv", "airing"))
-        if not passes:
-            logger.warning("流媒体上线监控：未勾选电影和剧集，跳过本次检测")
+        # 国内平台（B站）是否参与本次检测
+        bili_enabled = self._include_bili and (self._include_bili_anime
+                                               or self._include_bili_guochuang)
+        if not passes and not bili_enabled:
+            logger.warning("流媒体上线监控：未勾选电影、剧集与国内平台，跳过本次检测")
             return
 
         # 查询
         grouped: Dict[Tuple[str, str], List[dict]] = {}
         seen = set()
         failures: List[str] = []
+        # 记录成功返回的通道数：用于区分「全部通道失败」与「通道正常但无新内容」，
+        # 避免 TMDB 正常、仅国内平台接口失败时误发「检测失败」告警。
+        tmdb_ok = 0
         for mtype, phase in passes:
             try:
                 found = self._discover(mtype, phase, provider_ids)
@@ -517,6 +586,7 @@ class MoviePolit(_PluginBase):
                 failures.append(f"{self._phase_label(mtype, phase)}："
                                 f"{self._short(str(e), 60) or '未知错误'}")
                 continue
+            tmdb_ok += 1
             bucket = grouped.setdefault((mtype, phase), [])
             for item in found:
                 if item["key"] in seen:
@@ -549,7 +619,9 @@ class MoviePolit(_PluginBase):
 
         # 去重已推送 + 配额裁剪
         limit = self._max_items if self._max_items > 0 else 100
-        quota = max(1, int(limit / len(passes)) + (1 if limit % len(passes) else 0))
+        # 配额按「TMDB 通道数 + 国内平台通道数」均分，避免某一侧独占推送额度
+        channel_count = len(passes) + (1 if bili_enabled else 0)
+        quota = max(1, int(limit / channel_count) + (1 if limit % channel_count else 0))
         pushed = self.get_data(self._KEY_PUSHED)
         if not isinstance(pushed, dict):
             pushed = {}
@@ -564,6 +636,22 @@ class MoviePolit(_PluginBase):
                 candidates = self._confirm_digital(candidates, quota)
             if candidates:
                 sections.append((self._phase_label(mtype, phase), candidates))
+
+        # 国内平台（B站）：独立数据源，失败不影响 TMDB 通道
+        bili_failures: List[str] = []
+        bili_ok = False
+        if bili_enabled:
+            bili_items = self._bili_items(bili_failures)
+            # 只要没记失败，就认为本次国内平台通道正常（可能确实无排播内容）
+            bili_ok = not bili_failures
+            if self._dedupe:
+                bili_items = [item for item in bili_items if item["key"] not in pushed]
+            bili_items = bili_items[:quota]
+            if bili_items:
+                sections.append((self._bili_section_label(), bili_items))
+            for failure in bili_failures:
+                if failure not in failures:
+                    failures.append(failure)
 
         # 回查后条数可能减少，重新统计
         total = sum(len(items) for _, items in sections)
@@ -584,8 +672,11 @@ class MoviePolit(_PluginBase):
         })
 
         if not total:
-            if failures:
-                # 全部通道失败（如未配置 TMDB Key、网络不通）时明确告警，避免静默
+            # 只有当所有通道都失败（如未配置 TMDB Key、网络不通）才发告警。
+            # 若 TMDB 正常返回、只是没有新内容（或已被去重），则记日志即可，
+            # 避免「国内平台接口偶发失败」被误报成整体检测失败。
+            any_channel_ok = (tmdb_ok > 0) or bili_ok
+            if failures and not any_channel_ok:
                 logger.error(f"流媒体上线监控：检测失败：{failures}")
                 try:
                     self.post_message(mtype=self._notification_type(),
@@ -594,6 +685,9 @@ class MoviePolit(_PluginBase):
                                            + "\n".join(f"· {item}" for item in failures))
                 except Exception as e:
                     logger.error(f"流媒体上线监控：发送失败通知出错：{e}")
+            elif failures:
+                # 部分通道失败但仍有通道正常：仅日志提示，不打扰用户
+                logger.warning(f"流媒体上线监控：本次无新内容，部分通道失败：{failures}")
             else:
                 logger.info("流媒体上线监控：本次没有新的可推送内容")
             return
@@ -655,6 +749,15 @@ class MoviePolit(_PluginBase):
             return f"剧集 · 近期更新（最近 {self._days_back} 天）"
         return f"剧集 · 近期上线（最近 {self._days_back} 天）"
 
+    def _bili_section_label(self) -> str:
+        """国内平台分组标题。放送表最多覆盖未来 8 天（接口硬限制 after≤7）。"""
+        kinds = []
+        if self._include_bili_anime:
+            kinds.append("番剧")
+        if self._include_bili_guochuang:
+            kinds.append("国创")
+        return f"国内平台 · B站{'/'.join(kinds)}（未来 {self._BILI_AFTER_MAX + 1} 天）"
+
     def _build_message(self, sections: List[Tuple[str, List[dict]]],
                        unknown: List[str], failures: List[str],
                        notes: Optional[List[str]] = None) -> str:
@@ -669,7 +772,16 @@ class MoviePolit(_PluginBase):
             lines.extend(self._format_line(item) for item in items)
             lines.append("")
         total = sum(len(items) for _, items in sections)
-        lines.append(f"共 {total} 条 · 数据来源 TMDB · 点击消息查看完整详情")
+        # 数据源署名：只在确实出现了对应来源的条目时才列出，避免误导
+        sources: List[str] = []
+        if any(item.get("source") != "bilibili"
+               for _, items in sections for item in items):
+            sources.append("TMDB")
+        if any(item.get("source") == "bilibili"
+               for _, items in sections for item in items):
+            sources.append("哔哩哔哩")
+        lines.append(f"共 {total} 条 · 数据来源 {' / '.join(sources) or 'TMDB'}"
+                     f" · 点击消息查看完整详情")
         if unknown:
             available = self._available_provider_names()
             lines.append("⚠️ 未识别的平台：" + "、".join(unknown)
@@ -686,7 +798,17 @@ class MoviePolit(_PluginBase):
             parts.append(item["year"])
         if item.get("vote"):
             parts.append(f"{item['vote']}分")
-        if item.get("phase") == "airing":
+        # 国内平台（B站）：显示集数与具体上线时刻，而非「首播/数字版」
+        if item.get("source") == "bilibili":
+            if item.get("episode"):
+                parts.append(item["episode"])
+            if item.get("pub_time"):
+                parts.append(f"更新 {item['pub_time']}")
+            # 追番数：接口对未统计的条目返回占位符「-」，需过滤掉
+            follows = (item.get("follows") or "").strip()
+            if follows and follows != "-":
+                parts.append(follows)
+        elif item.get("phase") == "airing":
             parts.append("近期有新集")
         elif item.get("date"):
             label = "数字版" if item.get("type") == "movie" else "首播"
@@ -871,6 +993,9 @@ class MoviePolit(_PluginBase):
     def _attach_providers(self, items: List[dict]):
         """补充每条作品在本地区实际可用的平台（仅对最终待推送的条目查询）"""
         for item in items:
+            # 国内平台条目的来源已确定（B站），无需回查 TMDB
+            if item.get("source") == "bilibili":
+                continue
             try:
                 data = self._tmdb_get(f"/{item['type']}/{item['id']}/watch/providers", {})
             except Exception as e:
@@ -915,6 +1040,131 @@ class MoviePolit(_PluginBase):
         except Exception as e:
             logger.error(f"流媒体上线监控：解析 TMDB 响应失败：{e}")
             return None
+
+    # =====================================================================
+    #  国内平台查询（B站放送表）
+    # =====================================================================
+    def _bili_items(self, failures: List[str]) -> List[dict]:
+        """
+        拉取 B站番剧 / 国创放送表，返回统一结构的条目列表。
+
+        接口特征（实测）：
+          * GET /pgc/web/timeline?types=<1番剧|4国创>&before=0&after=<0..7>
+          * 无需任何鉴权；before 只能为 0，after 上限 7，即最多看未来 8 天。
+          * result 是按日期分组的列表，每组含 episodes 数组：
+              season_id  剧集 ID（去重键）
+              title      剧名
+              pub_index  集数文案（如「第24话」）
+              pub_time   当日更新时刻（如「10:00」）
+              pub_ts     该集上线的 Unix 时间戳
+              published  1 = 已上线，0 = 待上线
+              delay      1 = 延播（附 delay_reason）
+              cover      封面图 URL
+        同一 season 在窗口内可能出现多条（多集），只保留最早的一条。
+        """
+        types: List[Tuple[int, str]] = []
+        if self._include_bili_anime:
+            types.append((1, "番剧"))
+        if self._include_bili_guochuang:
+            types.append((4, "国创"))
+        if not types:
+            return []
+
+        # 窗口跟随「即将上线窗口」，但受接口硬限制 after≤7 约束
+        after = max(0, min(self._days_ahead, self._BILI_AFTER_MAX))
+        picked: Dict[Any, dict] = {}
+        for bili_type, kind in types:
+            try:
+                data = self._bili_get(self._BILI_TIMELINE, {
+                    "types": bili_type, "before": 0, "after": after,
+                })
+            except Exception as e:
+                logger.error(f"流媒体上线监控：B站{kind}放送表查询失败：{e}")
+                failures.append(f"B站{kind}：{self._short(str(e), 60) or '未知错误'}")
+                continue
+            if not data:
+                failures.append(f"B站{kind}：无响应")
+                continue
+            code = data.get("code")
+            if code != 0:
+                logger.error(f"流媒体上线监控：B站{kind}返回 code={code} "
+                             f"{data.get('message')!r}")
+                failures.append(f"B站{kind}：code={code} {data.get('message') or ''}".strip())
+                continue
+            count = 0
+            for group in data.get("result") or []:
+                for raw in group.get("episodes") or []:
+                    item = self._bili_build_item(raw, kind, group.get("date"))
+                    if not item:
+                        continue
+                    count += 1
+                    # 窗口内同一剧集可能有多集（如周更番跨多天）。按 season_id
+                    # 合并、只保留最早一集，避免一部番剧刷屏。
+                    # 注意：item["key"] 仍带日期，跨次检测时「下一集」会作为新
+                    # 键再次推送，不受此处窗口内合并的影响。
+                    existed = picked.get(item["id"])
+                    if existed is None or item["date"] < existed["date"]:
+                        picked[item["id"]] = item
+            logger.debug(f"流媒体上线监控：B站{kind}放送表命中 {count} 条")
+
+        items = sorted(picked.values(), key=lambda item: (item["date"], item["title"]))
+        return items
+
+    def _bili_build_item(self, raw: dict, kind: str, group_date: Optional[str]) -> Optional[dict]:
+        """把 B站放送表条目转成与 TMDB 一致的结构"""
+        season_id = raw.get("season_id")
+        title = (raw.get("title") or "").strip()
+        if not season_id or not title:
+            return None
+        pub_ts = self._to_float(raw.get("pub_ts"), 0.0)
+        if not pub_ts:
+            return None
+        # 延播条目的时刻不可信，直接剔除（避免推送错误时间）
+        if raw.get("delay"):
+            logger.debug(f"流媒体上线监控：B站《{title}》延播，跳过 "
+                         f"（{raw.get('delay_reason') or '无说明'}）")
+            return None
+        moment = datetime.fromtimestamp(pub_ts)
+        date_str = moment.strftime("%Y-%m-%d")
+        # 待上线（published=0）与已上线（published=1）都属于窗口内有效条目
+        return {
+            # 键用「剧集 + 上线日」：同一剧集的后续集数会生成新键，可分别推送
+            "key": f"bili:{season_id}:{date_str}",
+            "id": season_id,
+            "type": "tv",
+            "source": "bilibili",
+            "kind": kind,
+            "title": title,
+            "original_title": (raw.get("origin_title") or "").strip(),
+            "year": date_str[:4],
+            "date": date_str,
+            "vote": 0.0,
+            "popularity": self._to_float(raw.get("plays"), 0.0),
+            "poster": (raw.get("cover") or raw.get("square_cover") or "").strip(),
+            "overview": "",
+            "phase": "upcoming",
+            "episode": (raw.get("pub_index") or "").strip(),
+            "pub_time": (raw.get("pub_time") or "").strip(),
+            "published": bool(raw.get("published")),
+            "follows": (raw.get("follows") or "").strip(),
+            "url": f"https://www.bilibili.com/bangumi/play/ss{season_id}",
+            "providers": "哔哩哔哩",
+        }
+
+    @staticmethod
+    def _bili_get(url: str, params: dict = None) -> Optional[dict]:
+        """请求 B站公开接口。国内站直连即可，无需代理与鉴权。"""
+        res = RequestUtils(
+            ua=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+            referer="https://www.bilibili.com",
+            timeout=20,
+        ).get_res(url=url, params=params or {})
+        if not res:
+            raise RuntimeError("请求无响应")
+        if res.status_code != 200:
+            raise RuntimeError(f"HTTP {res.status_code}")
+        return res.json()
 
     # =====================================================================
     #  平台名称解析
@@ -1039,6 +1289,18 @@ class MoviePolit(_PluginBase):
     # =====================================================================
     #  详情页
     # =====================================================================
+    @staticmethod
+    def _item_kind_label(item: dict) -> str:
+        """条目的类型标签：区分 TMDB 电影/剧集 与 国内平台的番剧/国创"""
+        if item.get("source") == "bilibili":
+            return f"B站·{item.get('kind') or '剧集'}"
+        return "电影" if item.get("type") == "movie" else "剧集"
+
+    @staticmethod
+    def _item_link_label(item: dict) -> str:
+        """条目的外链按钮文案：不同数据源指向不同站点"""
+        return "哔哩哔哩" if item.get("source") == "bilibili" else "TMDB"
+
     def get_page(self) -> List[dict]:
         """插件详情页：概览 + 最新结果 + 推送历史"""
         latest = self.get_data(self._KEY_LATEST)
@@ -1107,7 +1369,7 @@ class MoviePolit(_PluginBase):
         table_rows = []
         for item in items:
             cells = [
-                self._td("电影" if item.get("type") == "movie" else "剧集"),
+                self._td(self._item_kind_label(item)),
                 self._td(f"《{item.get('title')}》"),
                 self._td(item.get("year") or "-"),
                 self._td(item.get("date") or "近期更新"),
@@ -1122,7 +1384,7 @@ class MoviePolit(_PluginBase):
                     "content": [{
                         "component": "a",
                         "props": {"href": item.get("url"), "target": "_blank"},
-                        "text": "TMDB",
+                        "text": self._item_link_label(item),
                     }],
                 }],
             })
@@ -1160,12 +1422,17 @@ class MoviePolit(_PluginBase):
                             "props": {"src": item["poster"], "height": "260", "cover": True}})
         lines = [f"《{item.get('title')}》"]
         meta = " · ".join(part for part in [
-            "电影" if item.get("type") == "movie" else "剧集",
+            self._item_kind_label(item),
             item.get("year") or "",
             f"{item.get('vote')}分" if item.get("vote") else "",
         ] if part)
         lines.append(meta)
-        if item.get("date"):
+        # 国内平台条目展示集数与更新时刻，TMDB 条目展示数字版/首播日期
+        if item.get("source") == "bilibili":
+            if item.get("episode"):
+                lines.append(f"{item['episode']}　更新 {item.get('date') or '-'}"
+                             f" {item.get('pub_time') or ''}".rstrip())
+        elif item.get("date"):
             lines.append(f"{'数字版' if item.get('type') == 'movie' else '首播'} {item['date']}")
         elif item.get("phase") == "airing":
             lines.append("近期有新集")
@@ -1184,7 +1451,7 @@ class MoviePolit(_PluginBase):
                 "component": "VBtn",
                 "props": {"variant": "text", "size": "small",
                           "href": item.get("url"), "target": "_blank"},
-                "text": "TMDB",
+                "text": self._item_link_label(item),
             }],
         })
         return {
