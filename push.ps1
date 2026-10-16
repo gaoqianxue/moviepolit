@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     把 MoviePolit 插件推送到你的 Git 仓库（Windows / PowerShell）。
 
@@ -46,9 +46,12 @@ if (-not $Proxy) {
 }
 
 # 所有要走网络的 git 命令都带上代理参数（仅本次调用生效，不写入 .git/config）
-$gitNet = @()
+# sslBackend=openssl：Windows 自带的 schannel 在经代理访问 github.com 时会握手失败
+# （fatal: schannel: failed to receive handshake, SSL/TLS connection failed），
+# 改用 openssl 后端即可正常通信。
+$gitNet = @("-c", "http.sslBackend=openssl")
 if ($Proxy) {
-    $gitNet = @("-c", "http.proxy=$Proxy", "-c", "https.proxy=$Proxy")
+    $gitNet += @("-c", "http.proxy=$Proxy", "-c", "https.proxy=$Proxy")
     Write-Host "使用代理: $Proxy" -ForegroundColor Cyan
 }
 
