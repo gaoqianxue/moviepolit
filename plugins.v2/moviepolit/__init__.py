@@ -7,21 +7,27 @@ MoviePolit - 流媒体上线监控
 数据来源：
   * 海外/港台流媒体：TheMovieDb（复用 MoviePilot「设置 → 媒体识别 → TheMovieDb」
     中的 API Key、API 域名、图片域名与代理配置，无需额外填写任何密钥）。
-  * 国内平台：哔哩哔哩（B站）番剧 / 国创放送表。国内平台中只有 B站 提供公开的
+  * 国内平台（B站）：哔哩哔哩番剧 / 国创放送表。国内平台中只有 B站 提供公开的
     排播接口且无需鉴权；接口硬限制为 before=0、after≤7，即只能看未来 8 天。
-    腾讯视频 / 优酷 / 芒果TV 既无公开 API，也不在 TMDB 收录范围内，无法可靠监控。
+  * 国内平台（豆瓣）：豆瓣移动端 rexxar 接口的「近期上线」集合（国产剧 / 热门剧集 /
+    热门综艺）。用于补齐腾讯视频 / 爱奇艺 / 优酷 / 芒果TV 的上新信息 —— 这些平台
+    既无公开 API，也不在 TMDB 收录范围内。豆瓣给出的是**已经上线/正在可看**的
+    时间（pubdate），不提供未来的流媒体排播日期，因此分组一律标注「新上线」。
 
-已知边界（由 TMDB 数据决定，非插件缺陷）：
+已知边界（由数据源决定，非插件缺陷）：
   * TMDB 的流媒体平台数据只覆盖部分国家/地区；中国大陆（CN）没有任何平台数据，
     腾讯视频、优酷、芒果TV、哔哩哔哩未被 TMDB 收录，因此无法作为筛选条件。
     默认区域取台湾（TW），请按需改为 HK / US / JP / KR / GB / SG。
   * 电影的流媒体上线日需回查 /movie/{id}/release_dates 的数字版（type=4）记录，
     不能直接使用 discover 返回的 release_date（那是首要/院线日期）。
+  * 豆瓣集合是院线/首播语义：带平台信息的条目均为「已上线」，pre_playable_date
+    恒为空。故豆瓣条目只按 pubdate 归入「最近 N 天」窗口，不承诺未来档期。
+  * 豆瓣电影集合（movie_latest）实测平台覆盖率为 0，故不接入；电影交由 TMDB 覆盖。
 """
 
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytz
@@ -42,9 +48,10 @@ class MoviePolit(_PluginBase):
     # ===== 插件元信息 =====
     plugin_name = "流媒体上线监控"
     plugin_desc = ("监控指定地区流媒体平台即将上线 / 近期上线的电影、剧集，"
-                   "并监控国内 B站 番剧 / 国创排播，通过 MoviePilot 通知渠道推送。")
+                   "并监控国内 B站 番剧 / 国创排播与豆瓣新上线（腾讯视频 / 爱奇艺 / "
+                   "优酷 / 芒果TV），通过 MoviePilot 通知渠道推送。")
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/movie.jpg"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "MoviePolit"
     plugin_config_prefix = "moviepolit_"
     plugin_order = 21
@@ -64,6 +71,9 @@ class MoviePolit(_PluginBase):
     _include_bili: bool = True
     _include_bili_anime: bool = True
     _include_bili_guochuang: bool = True
+    # 国内平台（豆瓣）新上线：剧集为主，语义为「近期可看」而非「即将上线」
+    _include_douban: bool = True
+    _include_douban_show: bool = True
     _days_ahead: int = 30
     _days_back: int = 7
     _max_items: int = 30
@@ -98,6 +108,29 @@ class MoviePolit(_PluginBase):
     # B站条目追番数阈值（低于该值的新番信息量过低，默认不过滤）
     _BILI_MIN_FAVES = 0
 
+    # ===== 国内平台（豆瓣）新上线 =====
+    # 豆瓣 rexxar 移动端接口无需鉴权；旧官方 API（api.douban.com/v2）已 403 要求授权。
+    # 语义限制：豆瓣提供的是「当前/近期可看」而非「即将上线」——可用集合的元数据
+    # 明确写为「院线即将上映」，条目均为已上线（is_released=True），pubdate 是首播日。
+    # 因此豆瓣通道只做「近期新上线」，不做「即将上线」。
+    # 实测平台字段覆盖率：tv_domestic 19/20、tv_hot 13/20、show_hot 8/20；
+    # movie_latest 与 tv_korean 均为 0/20（无平台数据），故不纳入。
+    _DOUBAN_API = "https://m.douban.com/rexxar/api/v2"
+    _DOUBAN_COLLECTIONS = (
+        ("tv_domestic", "国产剧"),
+        ("tv_hot", "热门剧集"),
+        ("show_hot", "热门综艺"),
+    )
+    # 从 vendors 的 app_bundle_id 推断平台名（linewatches 缺失时的兜底）
+    _DOUBAN_BUNDLE_MAP = {
+        "com.tencent.qqlive": "腾讯视频",
+        "com.iqiyi.video": "爱奇艺",
+        "com.qiyi.video": "爱奇艺",
+        "com.youku.phone": "优酷",
+        "com.hunantv.imgo.activity": "芒果TV",
+        "tv.danmaku.bili": "哔哩哔哩",
+    }
+
     # 区域下拉
     _REGIONS = [
         {"title": "中国大陆 (CN)", "value": "CN"},
@@ -128,6 +161,8 @@ class MoviePolit(_PluginBase):
         self._include_bili = bool(config.get("include_bili", True))
         self._include_bili_anime = bool(config.get("include_bili_anime", True))
         self._include_bili_guochuang = bool(config.get("include_bili_guochuang", True))
+        self._include_douban = bool(config.get("include_douban", True))
+        self._include_douban_show = bool(config.get("include_douban_show", True))
         self._days_ahead = self._to_int(config.get("days_ahead"), 30, 0, 365)
         self._days_back = self._to_int(config.get("days_back"), 7, 0, 365)
         self._max_items = self._to_int(config.get("max_items"), 30, 1, 100)
@@ -164,6 +199,8 @@ class MoviePolit(_PluginBase):
             "include_bili": self._include_bili,
             "include_bili_anime": self._include_bili_anime,
             "include_bili_guochuang": self._include_bili_guochuang,
+            "include_douban": self._include_douban,
+            "include_douban_show": self._include_douban_show,
             "days_ahead": self._days_ahead,
             "days_back": self._days_back,
             "max_items": self._max_items,
@@ -379,6 +416,30 @@ class MoviePolit(_PluginBase):
                             },
                         ],
                     },
+                    # 第五行之二：国内平台（豆瓣）
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {"component": "VSwitch",
+                                     "props": {"model": "include_douban",
+                                               "label": "国内平台新上线（豆瓣）"}}
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {"component": "VSwitch",
+                                     "props": {"model": "include_douban_show",
+                                               "label": "豆瓣含综艺"}}
+                                ],
+                            },
+                        ],
+                    },
                     # 第六行：时间窗口与条数
                     {
                         "component": "VRow",
@@ -527,6 +588,8 @@ class MoviePolit(_PluginBase):
             "include_bili": True,
             "include_bili_anime": True,
             "include_bili_guochuang": True,
+            "include_douban": True,
+            "include_douban_show": True,
             "days_ahead": 30,
             "days_back": 7,
             "max_items": 30,
@@ -567,7 +630,9 @@ class MoviePolit(_PluginBase):
         # 国内平台（B站）是否参与本次检测
         bili_enabled = self._include_bili and (self._include_bili_anime
                                                or self._include_bili_guochuang)
-        if not passes and not bili_enabled:
+        # 国内平台（豆瓣）新上线：与 B站相互独立，可单独开关
+        douban_enabled = self._include_douban
+        if not passes and not bili_enabled and not douban_enabled:
             logger.warning("流媒体上线监控：未勾选电影、剧集与国内平台，跳过本次检测")
             return
 
@@ -620,7 +685,7 @@ class MoviePolit(_PluginBase):
         # 去重已推送 + 配额裁剪
         limit = self._max_items if self._max_items > 0 else 100
         # 配额按「TMDB 通道数 + 国内平台通道数」均分，避免某一侧独占推送额度
-        channel_count = len(passes) + (1 if bili_enabled else 0)
+        channel_count = len(passes) + (1 if bili_enabled else 0) + (1 if douban_enabled else 0)
         quota = max(1, int(limit / channel_count) + (1 if limit % channel_count else 0))
         pushed = self.get_data(self._KEY_PUSHED)
         if not isinstance(pushed, dict):
@@ -653,6 +718,21 @@ class MoviePolit(_PluginBase):
                 if failure not in failures:
                     failures.append(failure)
 
+        # 国内平台（豆瓣）新上线：与 B站相互独立，各自记录成败
+        douban_failures: List[str] = []
+        douban_ok = False
+        if douban_enabled:
+            douban_items = self._douban_items(douban_failures)
+            douban_ok = not douban_failures
+            if self._dedupe:
+                douban_items = [item for item in douban_items if item["key"] not in pushed]
+            douban_items = douban_items[:quota]
+            if douban_items:
+                sections.append((self._douban_section_label(), douban_items))
+            for failure in douban_failures:
+                if failure not in failures:
+                    failures.append(failure)
+
         # 回查后条数可能减少，重新统计
         total = sum(len(items) for _, items in sections)
 
@@ -675,7 +755,7 @@ class MoviePolit(_PluginBase):
             # 只有当所有通道都失败（如未配置 TMDB Key、网络不通）才发告警。
             # 若 TMDB 正常返回、只是没有新内容（或已被去重），则记日志即可，
             # 避免「国内平台接口偶发失败」被误报成整体检测失败。
-            any_channel_ok = (tmdb_ok > 0) or bili_ok
+            any_channel_ok = (tmdb_ok > 0) or bili_ok or douban_ok
             if failures and not any_channel_ok:
                 logger.error(f"流媒体上线监控：检测失败：{failures}")
                 try:
@@ -758,6 +838,11 @@ class MoviePolit(_PluginBase):
             kinds.append("国创")
         return f"国内平台 · B站{'/'.join(kinds)}（未来 {self._BILI_AFTER_MAX + 1} 天）"
 
+    def _douban_section_label(self) -> str:
+        """豆瓣分组标题。语义为「近期新上线」而非「即将上线」——豆瓣不提供
+        未来的流媒体排播日期，只有已上线条目的首播日。"""
+        return f"国内平台 · 豆瓣新上线（最近 {self._days_back} 天）"
+
     def _build_message(self, sections: List[Tuple[str, List[dict]]],
                        unknown: List[str], failures: List[str],
                        notes: Optional[List[str]] = None) -> str:
@@ -774,12 +859,14 @@ class MoviePolit(_PluginBase):
         total = sum(len(items) for _, items in sections)
         # 数据源署名：只在确实出现了对应来源的条目时才列出，避免误导
         sources: List[str] = []
-        if any(item.get("source") != "bilibili"
-               for _, items in sections for item in items):
+        all_items_flat = [item for _, items in sections for item in items]
+        if any(item.get("source") not in ("bilibili", "douban")
+               for item in all_items_flat):
             sources.append("TMDB")
-        if any(item.get("source") == "bilibili"
-               for _, items in sections for item in items):
+        if any(item.get("source") == "bilibili" for item in all_items_flat):
             sources.append("哔哩哔哩")
+        if any(item.get("source") == "douban" for item in all_items_flat):
+            sources.append("豆瓣")
         lines.append(f"共 {total} 条 · 数据来源 {' / '.join(sources) or 'TMDB'}"
                      f" · 点击消息查看完整详情")
         if unknown:
@@ -808,6 +895,12 @@ class MoviePolit(_PluginBase):
             follows = (item.get("follows") or "").strip()
             if follows and follows != "-":
                 parts.append(follows)
+        # 国内平台（豆瓣）：显示集数与上线日期；平台名已在 providers 里
+        elif item.get("source") == "douban":
+            if item.get("episode"):
+                parts.append(item["episode"])
+            if item.get("date"):
+                parts.append(f"上线 {item['date'][5:]}")
         elif item.get("phase") == "airing":
             parts.append("近期有新集")
         elif item.get("date"):
@@ -993,8 +1086,8 @@ class MoviePolit(_PluginBase):
     def _attach_providers(self, items: List[dict]):
         """补充每条作品在本地区实际可用的平台（仅对最终待推送的条目查询）"""
         for item in items:
-            # 国内平台条目的来源已确定（B站），无需回查 TMDB
-            if item.get("source") == "bilibili":
+            # 国内平台条目的来源与平台已确定（B站/豆瓣），无需回查 TMDB
+            if item.get("source") in ("bilibili", "douban"):
                 continue
             try:
                 data = self._tmdb_get(f"/{item['type']}/{item['id']}/watch/providers", {})
@@ -1167,6 +1260,173 @@ class MoviePolit(_PluginBase):
         return res.json()
 
     # =====================================================================
+    #  国内平台查询（豆瓣新上线）
+    # =====================================================================
+    # 每次检测每个集合最多回查的详情数：豆瓣详情接口需逐条请求，限制以控制
+    # 请求量与反爬风险（实测低频请求 12 连发无封锁，但仍应克制）。
+    _DOUBAN_DETAIL_LIMIT = 20
+
+    def _douban_items(self, failures: List[str]) -> List[dict]:
+        """
+        拉取豆瓣「近期新上线」的国产剧 / 热门剧集 / 综艺。
+
+        语义边界（实测结论，非缺陷）：
+          * 豆瓣可用集合（tv_domestic/tv_hot/show_hot）的条目均为**已上线**，
+            `pubdate` 是首播日期；`pre_playable_date` 全部为空。因此豆瓣通道
+            只能提供「近期新上线」语义，无法提供「即将上线」的流媒体排播日期。
+          * 电影侧集合（movie_latest）平台字段覆盖率为 0/20，故不纳入——电影
+            已由 TMDB 的数字版日期通道覆盖，无需重复。
+          * tv_hot 与 tv_domestic 存在大量重合条目，必须按豆瓣 id 跨集合去重。
+
+        请求策略：
+          * 列表接口含 `vendor_icons`（可判断该条目有无平台信息），但**不含**
+            `pubdate`。故先用列表响应预筛「有平台」的条目，再逐条回查详情取
+            上线日期与平台名，避免对无平台条目浪费请求。
+        """
+        collections = list(self._DOUBAN_COLLECTIONS)
+        if not self._include_douban_show:
+            # 关闭综艺后只保留剧集类集合
+            collections = [(cid, name) for cid, name in collections if cid != "show_hot"]
+        if not collections:
+            return []
+
+        today = self._now().date()
+        lo = today - timedelta(days=self._days_back)
+        picked: Dict[Any, dict] = {}
+
+        for cid, kind in collections:
+            try:
+                data = self._douban_get(f"/subject_collection/{cid}/items",
+                                        {"start": 0, "count": self._DOUBAN_DETAIL_LIMIT})
+            except Exception as e:
+                logger.error(f"流媒体上线监控：豆瓣{kind}列表查询失败：{e}")
+                failures.append(f"豆瓣{kind}：{self._short(str(e), 60) or '未知错误'}")
+                continue
+            if not data:
+                failures.append(f"豆瓣{kind}：无响应")
+                continue
+
+            listed = data.get("subject_collection_items") or []
+            # 预筛：只回查列表里已标注平台的条目（vendor_icons 非空）
+            candidates = [row for row in listed if row.get("vendor_icons")]
+            skipped = len(listed) - len(candidates)
+            logger.debug(f"流媒体上线监控：豆瓣{kind}列表 {len(listed)} 条，"
+                         f"有平台标记 {len(candidates)} 条，跳过 {skipped} 条")
+
+            count = 0
+            for row in candidates:
+                item = self._douban_build_item(row, kind, lo, today)
+                if not item:
+                    continue
+                count += 1
+                # 跨集合去重：同一部剧可能同时出现在 tv_hot 与 tv_domestic
+                existed = picked.get(item["key"])
+                if existed is None or item["date"] > existed["date"]:
+                    picked[item["key"]] = item
+            logger.debug(f"流媒体上线监控：豆瓣{kind}详情回查命中 {count} 条")
+
+        items = sorted(picked.values(), key=lambda item: (item["date"], item["title"]),
+                       reverse=True)
+        return items
+
+    def _douban_build_item(self, row: dict, kind: str, lo: date, hi: date) -> Optional[dict]:
+        """回查豆瓣详情，取上线日期与平台名，并按窗口过滤"""
+        douban_id = row.get("id")
+        subject_type = (row.get("type") or "tv").strip() or "tv"
+        if not douban_id:
+            return None
+        try:
+            detail = self._douban_get(f"/{subject_type}/{douban_id}",
+                                      {"for_mobile": 1})
+        except Exception as e:
+            logger.debug(f"流媒体上线监控：豆瓣条目 {douban_id} 详情查询失败：{e}")
+            return None
+        if not detail or not isinstance(detail, dict):
+            return None
+
+        title = (detail.get("title") or row.get("title") or "").strip()
+        if not title:
+            return None
+        # 平台名：优先 linewatches[].source.name（干净可读），回退 vendors 的 bundle id
+        platforms = self._douban_platforms(detail)
+        if not platforms:
+            return None
+        # 上线日期：pubdate 是 list[str]，形如「2026-09-11(中国大陆)」
+        released = self._douban_pubdate(detail)
+        if not released or released < lo or released > hi:
+            return None
+
+        pic = (detail.get("pic") or row.get("pic") or {})
+        poster = (pic.get("large") or pic.get("normal") or "") if isinstance(pic, dict) else ""
+        rating = detail.get("rating") or {}
+        vote = self._to_float(rating.get("value"), 0.0) if isinstance(rating, dict) else 0.0
+        return {
+            "key": f"douban:{douban_id}",
+            "id": douban_id,
+            "type": "tv",
+            "source": "douban",
+            "kind": kind,
+            "title": title,
+            "original_title": (detail.get("original_title") or "").strip(),
+            "year": (detail.get("year") or row.get("year") or released.year),
+            "date": released.strftime("%Y-%m-%d"),
+            "vote": round(vote, 1),
+            "popularity": self._to_float(row.get("wish_count"), 0.0),
+            "poster": poster,
+            "overview": self._short((detail.get("intro") or "").strip(), 80),
+            "phase": "recent",
+            "episode": (detail.get("episodes_info") or "").strip(),
+            "url": f"https://movie.douban.com/subject/{douban_id}/",
+            "providers": " / ".join(platforms[:4]),
+        }
+
+    def _douban_platforms(self, detail: dict) -> List[str]:
+        """从豆瓣详情里抽取干净的平台名列表"""
+        names: List[str] = []
+        for line in detail.get("linewatches") or []:
+            source = line.get("source") or {}
+            name = (source.get("name") or "").strip()
+            if name and name not in names:
+                names.append(name)
+        if names:
+            return names
+        # 回退：用 vendors 的 app_bundle_id 反查平台名
+        for vendor in detail.get("vendors") or []:
+            bundle = (vendor.get("app_bundle_id") or "").lower()
+            for key, name in self._DOUBAN_BUNDLE_MAP.items():
+                if key in bundle and name not in names:
+                    names.append(name)
+        return names
+
+    @staticmethod
+    def _douban_pubdate(detail: dict) -> Optional[date]:
+        """解析 pubdate（形如 ['2026-09-11(中国大陆)']）取第一个有效日期"""
+        for entry in detail.get("pubdate") or []:
+            match = re.search(r"(\d{4})-(\d{2})-(\d{2})", str(entry))
+            if not match:
+                continue
+            try:
+                return datetime.strptime(match.group(0), "%Y-%m-%d").date()
+            except ValueError:
+                continue
+        return None
+
+    def _douban_get(self, path: str, params: dict = None) -> Optional[dict]:
+        """请求豆瓣 rexxar 移动端接口。无需鉴权，但需 Referer 与移动端 UA。"""
+        res = RequestUtils(
+            ua=("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+                "Mobile/15E148 Safari/604.1"),
+            referer="https://m.douban.com/",
+            timeout=20,
+        ).get_res(url=f"{self._DOUBAN_API}{path}", params=params or {})
+        if not res:
+            raise RuntimeError("请求无响应")
+        if res.status_code != 200:
+            raise RuntimeError(f"HTTP {res.status_code}")
+        return res.json()
+
+    # =====================================================================
     #  平台名称解析
     # =====================================================================
     def _resolve_provider_ids(self) -> Tuple[List[int], List[str]]:
@@ -1291,15 +1551,21 @@ class MoviePolit(_PluginBase):
     # =====================================================================
     @staticmethod
     def _item_kind_label(item: dict) -> str:
-        """条目的类型标签：区分 TMDB 电影/剧集 与 国内平台的番剧/国创"""
+        """条目的类型标签：区分 TMDB 电影/剧集 与 国内平台的番剧/国创/新上线"""
         if item.get("source") == "bilibili":
             return f"B站·{item.get('kind') or '剧集'}"
+        if item.get("source") == "douban":
+            return f"豆瓣·{item.get('kind') or '剧集'}"
         return "电影" if item.get("type") == "movie" else "剧集"
 
     @staticmethod
     def _item_link_label(item: dict) -> str:
         """条目的外链按钮文案：不同数据源指向不同站点"""
-        return "哔哩哔哩" if item.get("source") == "bilibili" else "TMDB"
+        if item.get("source") == "bilibili":
+            return "哔哩哔哩"
+        if item.get("source") == "douban":
+            return "豆瓣"
+        return "TMDB"
 
     def get_page(self) -> List[dict]:
         """插件详情页：概览 + 最新结果 + 推送历史"""
@@ -1427,11 +1693,18 @@ class MoviePolit(_PluginBase):
             f"{item.get('vote')}分" if item.get("vote") else "",
         ] if part)
         lines.append(meta)
-        # 国内平台条目展示集数与更新时刻，TMDB 条目展示数字版/首播日期
+        # 国内平台条目展示集数与上线信息，TMDB 条目展示数字版/首播日期
         if item.get("source") == "bilibili":
             if item.get("episode"):
                 lines.append(f"{item['episode']}　更新 {item.get('date') or '-'}"
                              f" {item.get('pub_time') or ''}".rstrip())
+        elif item.get("source") == "douban":
+            detail = "　".join(part for part in [
+                item.get("episode") or "",
+                f"上线 {item['date']}" if item.get("date") else "",
+            ] if part)
+            if detail:
+                lines.append(detail)
         elif item.get("date"):
             lines.append(f"{'数字版' if item.get('type') == 'movie' else '首播'} {item['date']}")
         elif item.get("phase") == "airing":
